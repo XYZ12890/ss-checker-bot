@@ -31,7 +31,7 @@ CHANNEL_ID = 1395273290703966320  # replace with your screenshot channel
 VERIFIED_ROLE_NAME = "Verified"
 REGISTER_CHANNEL_ID = 1395257235881328681
 
-used_attachments = set()
+used_filenames = set()
 
 @bot.event
 async def on_ready():
@@ -40,7 +40,9 @@ async def on_ready():
 @bot.event
 async def on_message(message):
     if message.channel.id == CHANNEL_ID and message.attachments:
-        if message.attachments[0].url in used_attachments:
+        filename = message.attachments[0].filename
+
+        if filename in used_filenames:
             await message.reply("❌ This screenshot has already been used.")
             return
 
