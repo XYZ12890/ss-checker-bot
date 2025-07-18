@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 import os
-from flask import flask
+from flask import Flask
 import threading 
 
 intents = discord.Intents.default()
