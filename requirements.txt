@@ -1,2 +1,7 @@
 discord.py
-flask
+pytesseract
+opencv-python
+Pillow
+Flask
+requests
+numpy
