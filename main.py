@@ -1,6 +1,8 @@
 import discord
 from discord.ext import commands
 import os
+import flask from flask
+import threading 
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -42,11 +44,7 @@ async def on_message(message):
 
     await bot.process_commands(message)
         
-TOKEN = os.getenv("DISCORD_TOKEN")
-from flask import Flask
-from threading import Thread
-
-app = Flask('')
+    app = Flask('')
 
 @app.route('/')
 def home():
@@ -59,5 +57,5 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
     keep_alive()
-bot.run(TOKEN)
+bot.run(os.getenv("DISCORD_TOKEN"))
   
