@@ -41,17 +41,6 @@ async def on_message(message):
         )
 
     await bot.process_commands(message)
-const express = require('express');
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.get('/', (req, res) => {
-  res.send('Bot is running!');
-});
-
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
         
 TOKEN = os.getenv("DISCORD_TOKEN")
 from flask import Flask
