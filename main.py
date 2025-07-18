@@ -46,7 +46,7 @@ async def on_message(message):
             await message.reply("❌ This screenshot has already been used.")
             return
 
-        used_attachments.add(message.attachments[0].url)
+        used_filenames.add(filename)
         await message.add_reaction("✅")
 
         # Assign Role
