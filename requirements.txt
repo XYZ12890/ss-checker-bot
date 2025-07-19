@@ -1,7 +1,6 @@
-discord.py
+discord.py==2.2.2
 pytesseract
 opencv-python
+numpy
 Pillow
 Flask
-requests
-numpy
