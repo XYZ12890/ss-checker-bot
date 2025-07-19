@@ -92,4 +92,4 @@ async def on_message(message):
 
     await bot.process_commands(message)
 TOKEN = os.getenv("DISCORD_TOKEN")
-bot.run("TOKEN")
+bot.run(TOKEN)
