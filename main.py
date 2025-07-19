@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-import pytesseract
+from pytesseract import pytesseract
 import cv2
 import numpy as np
 import os
