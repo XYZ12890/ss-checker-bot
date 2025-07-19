@@ -1,80 +1,94 @@
 import discord
+from discord.ext import commands
 import pytesseract
-from PIL import Image
-import io
-import re
-import os
 import cv2
 import numpy as np
-from keep_alive import keep_alive
+import hashlib
+from PIL import Image
+import aiohttp
+import io
+import re
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.guilds = True
 intents.messages = True
-intents.reactions = True
+intents.guilds = True
 intents.members = True
 
-client = discord.Client(intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- CONFIGURATION ---
-TOKEN = os.getenv("DISCORD_TOKEN")
-TARGET_CHANNEL_ID = 1395273290703966320
+# Channel and role IDs
+TARGET_CHANNEL_ID = 1395273290703966320  # Replace with your target channel ID
 VERIFIED_ROLE_NAME = "Verified"
 
-# --- KEYWORDS ---
-PAYMENT_KEYWORDS = [
-    "sent", "paid", "upi", "payment", "successfully",
-    "sbi", "ybl", "axis", "icici", "hdfc", "transaction", "to", "₹", "rs"
+# Track used images
+used_hashes = set()
+retry_users = set()
+
+# Broad keywords list
+payment_keywords = [
+    "payment", "received", "upi", "gpay", "paytm", "phonepe", "successful", "successfully",
+    "credited", "debited", "sent", "transfer", "ybl", "sbi", "amount", "rs", "rupees",
+    "to", "bhim", "done", "transaction", "upi transaction", "bank"
 ]
 
-user_attempts = {}
+@bot.event
+async def on_ready():
+    print(f"✅ Bot logged in as {bot.user}")
 
-# --- OCR FUNCTION ---
-def extract_text(image_bytes):
-    try:
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        gray = cv2.cvtColor(img_np, cv2.COLOR_BGR2GRAY)
-        _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
-        return pytesseract.image_to_string(thresh)
-    except Exception as e:
-        print("OCR error:", e)
-        return ""
-
-# --- MESSAGE HANDLER ---
-@client.event
+@bot.event
 async def on_message(message):
     if message.channel.id != TARGET_CHANNEL_ID or message.author.bot:
         return
 
-    if not message.attachments:
-        return
+    if message.attachments:
+        for attachment in message.attachments:
+            try:
+                # Download image
+                img_bytes = await attachment.read()
+                img_hash = hashlib.sha256(img_bytes).hexdigest()
 
-    for attachment in message.attachments:
-        if any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg']):
-            image_data = await attachment.read()
-            text = extract_text(image_data).lower()
+                # Check if already used
+                if img_hash in used_hashes:
+                    await message.channel.send(f"⚠️ Image already used! {message.author.mention}")
+                    return
 
-            if any(keyword in text for keyword in PAYMENT_KEYWORDS):
-                await message.add_reaction("✅")
-                role = discord.utils.get(message.guild.roles, name=VERIFIED_ROLE_NAME)
-                if role:
-                    await message.author.add_roles(role)
-                await message.channel.send(f"{message.author.mention}, ✅ Payment Verified!")
-            else:
-                uid = str(message.author.id)
-                if user_attempts.get(uid, 0) >= 1:
-                    await message.delete()
-                    await message.channel.send(f"{message.author.mention} ⚠️ Invalid or reused screenshot! Contact admin.")
+                # Convert to OpenCV format
+                img_stream = io.BytesIO(img_bytes)
+                image = Image.open(img_stream).convert("RGB")
+                open_cv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+                # OCR
+                extracted_text = pytesseract.image_to_string(open_cv_image).lower()
+
+                # Check keywords
+                if any(keyword in extracted_text for keyword in payment_keywords):
+                    used_hashes.add(img_hash)
+
+                    # Add reaction
+                    await message.add_reaction("✅")
+
+                    # Assign role
+                    guild = message.guild
+                    role = discord.utils.get(guild.roles, name=VERIFIED_ROLE_NAME)
+                    if role:
+                        await message.author.add_roles(role)
+                        await message.channel.send(f"✅ Payment verified! {message.author.mention} is now verified.")
+                    else:
+                        await message.channel.send("❌ Verified role not found.")
+
                 else:
-                    user_attempts[uid] = user_attempts.get(uid, 0) + 1
-                    await message.channel.send(f"{message.author.mention} ❌ Invalid screenshot detected! One last retry allowed.")
+                    # Retry check
+                    if message.author.id in retry_users:
+                        await message.delete()
+                        await message.channel.send(f"❌ {message.author.mention} invalid SS again. No more chances.")
+                    else:
+                        retry_users.add(message.author.id)
+                        await message.channel.send(f"⚠️ {message.author.mention} invalid SS! Last chance, upload a real UPI payment screenshot.")
+            except Exception as e:
+                print("Error:", e)
+                await message.channel.send("❌ Error processing image. Try again.")
 
-# --- ON READY ---
-@client.event
-async def on_ready():
-    print(f"Logged in as {client.user}")
+    await bot.process_commands(message)
 
-keep_alive()
-client.run(TOKEN)
+bot.run("DISCORD_TOKEN")
