@@ -9,6 +9,8 @@ from PIL import Image
 import aiohttp
 import io
 import re
+pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"  # Adjust this if your path is different
+
 
 intents = discord.Intents.default()
 intents.message_content = True
