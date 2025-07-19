@@ -47,4 +47,4 @@ async def on_message(message):
                     await message.delete()
                     await message.channel.send(f"{message.author.mention} ⚠️ Invalid screenshot. Please upload a valid payment proof with UPI details.")
     await bot.process_commands(message)
-                    
+     bot.run(TOKEN)               
