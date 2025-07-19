@@ -7,6 +7,12 @@ import io
 import os
 from flask import Flask
 from threading import Thread
+import pytesseract
+try:
+    print("Tesseract version:", pytesseract.get_tesseract_version())
+except Exception as e:
+    print("Tesseract is NOT installed or not found in PATH:", e)
+    
 
 app = Flask(__name__)
 
