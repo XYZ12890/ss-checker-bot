@@ -3,6 +3,7 @@ from discord.ext import commands
 import pytesseract
 import cv2
 import numpy as np
+import os
 import hashlib
 from PIL import Image
 import aiohttp
@@ -90,5 +91,5 @@ async def on_message(message):
                 await message.channel.send("❌ Error processing image. Try again.")
 
     await bot.process_commands(message)
-
-bot.run("DISCORD_TOKEN")
+TOKEN = os.getenv("DISCORD_TOKEN")
+bot.run("TOKEN")
