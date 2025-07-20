@@ -11,6 +11,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.messages = True
 intents.guilds = True
+intents.members = True  # Needed for managing roles
 
 client = discord.Client(intents=intents)
 
@@ -46,9 +47,19 @@ def get_image_hash(image_bytes):
 
 def is_payment_screenshot(text):
     # Add or adjust payment keywords as needed
-    keywords = ["paid", "payment", "successful", "amount", "received", "paytm" , "transaction" , "gpay" , "phonepe" , "transferred" , "upi" , "20"]
+    keywords = ["paid", "payment", "successful", "amount", "received", "transaction"]
     text_lower = text.lower()
     return any(keyword in text_lower for keyword in keywords)
+
+async def assign_verified_role(member):
+    # Find the "Verified" role and assign it to the member
+    guild = member.guild
+    verified_role = discord.utils.get(guild.roles, name="Verified")
+    if verified_role and verified_role not in member.roles:
+        try:
+            await member.add_roles(verified_role, reason="Sent verified payment screenshot")
+        except Exception as e:
+            print(f"Error assigning Verified role: {e}")
 
 @client.event
 async def on_ready():
@@ -75,12 +86,20 @@ async def on_message(message):
                 text = pytesseract.image_to_string(img)
 
                 if not is_payment_screenshot(text):
+                    await message.reply("Send payment screenshot, otherwise you will be get banned.")
                     await message.delete()
                     return
 
                 processed_hashes.add(image_hash)
                 save_processed_hashes(processed_hashes)
                 await message.add_reaction("✅")
+                # Assign Verified role
+                if isinstance(message.author, discord.Member):
+                    await assign_verified_role(message.author)
+                elif message.guild:
+                    member = message.guild.get_member(message.author.id)
+                    if member:
+                        await assign_verified_role(member)
 
             except Exception as e:
                 await message.channel.send(f"⚠️ Error processing screenshot: {e}")
