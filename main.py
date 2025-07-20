@@ -24,7 +24,6 @@ def home():
 def run_web():
     app.run(host="0.0.0.0", port=8080)
 
-# Start Flask in a separate thread
 threading.Thread(target=run_web, daemon=True).start()
 
 HASH_FILE = "processed_hashes.txt"
@@ -45,6 +44,12 @@ processed_hashes = load_processed_hashes()
 def get_image_hash(image_bytes):
     return hashlib.sha256(image_bytes).hexdigest()
 
+def is_payment_screenshot(text):
+    # Add or adjust payment keywords as needed
+    keywords = ["paid", "payment", "successful", "amount", "received", "paytm" , "transaction" , "gpay" , "phonepe" , "transferred" , "upi" , "20"]
+    text_lower = text.lower()
+    return any(keyword in text_lower for keyword in keywords)
+
 @client.event
 async def on_ready():
     print(f'Logged in as {client.user}')
@@ -54,28 +59,32 @@ async def on_message(message):
     if message.author == client.user:
         return
 
-    # Only process if there is at least one attachment that's an image
-    image_processed = False
     for attachment in message.attachments:
         if attachment.content_type and attachment.content_type.startswith('image/'):
             image_bytes = await attachment.read()
             image_hash = get_image_hash(image_bytes)
+
+            # Check for reused screenshot
             if image_hash in processed_hashes:
-                await message.channel.send("❌ This screenshot has already been used!")
-                return  # Stop further processing for duplicates
-            processed_hashes.add(image_hash)
-            save_processed_hashes(processed_hashes)
+                await message.delete()
+                return
+
             try:
                 image_stream = io.BytesIO(image_bytes)
                 img = Image.open(image_stream)
-                _ = pytesseract.image_to_string(img)  # Just run OCR, ignore result
-                image_processed = True
+                text = pytesseract.image_to_string(img)
+
+                if not is_payment_screenshot(text):
+                    await message.delete()
+                    return
+
+                processed_hashes.add(image_hash)
+                save_processed_hashes(processed_hashes)
+                await message.add_reaction("✅")
+
             except Exception as e:
                 await message.channel.send(f"⚠️ Error processing screenshot: {e}")
-                return  # Stop further processing if error
-
-    if image_processed:
-        await message.channel.send("✅ Screenshot processed!")
+                return
 
 # Start the bot
 TOKEN = os.getenv("DISCORD_TOKEN") or "YOUR_DISCORD_TOKEN"
