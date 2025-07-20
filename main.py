@@ -73,12 +73,12 @@ async def on_message(message):
                 processed_hashes.add(image_hash)
                 save_processed_hashes(processed_hashes)
 
-                # Run OCR
+                # Run OCR (but do not reply with extracted text)
                 try:
                     image_stream = io.BytesIO(image_bytes)
                     img = Image.open(image_stream)
-                    text = pytesseract.image_to_string(img)
-                    await message.channel.send(f"✅ Screenshot processed!\nExtracted Text:\n```\n{text}\n```")
+                    _ = pytesseract.image_to_string(img)
+                    await message.channel.send("✅ Screenshot processed!")
                 except Exception as e:
                     await message.channel.send(f"⚠️ Error processing screenshot: {e}")
 
