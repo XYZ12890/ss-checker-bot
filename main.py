@@ -27,7 +27,6 @@ def run_web():
 # Start Flask in a separate thread
 threading.Thread(target=run_web, daemon=True).start()
 
-# Use a file to store processed hashes for persistence
 HASH_FILE = "processed_hashes.txt"
 
 def load_processed_hashes():
@@ -52,36 +51,32 @@ async def on_ready():
 
 @client.event
 async def on_message(message):
-    # Ignore messages sent by the bot itself
     if message.author == client.user:
         return
 
-    # Process only messages with attachments
-    if message.attachments:
-        for attachment in message.attachments:
-            # Only process images (screenshots)
-            if attachment.content_type and attachment.content_type.startswith('image/'):
-                image_bytes = await attachment.read()
-                image_hash = get_image_hash(image_bytes)
+    # Only process if there is at least one attachment that's an image
+    image_processed = False
+    for attachment in message.attachments:
+        if attachment.content_type and attachment.content_type.startswith('image/'):
+            image_bytes = await attachment.read()
+            image_hash = get_image_hash(image_bytes)
+            if image_hash in processed_hashes:
+                await message.channel.send("❌ This screenshot has already been used!")
+                return  # Stop further processing for duplicates
+            processed_hashes.add(image_hash)
+            save_processed_hashes(processed_hashes)
+            try:
+                image_stream = io.BytesIO(image_bytes)
+                img = Image.open(image_stream)
+                _ = pytesseract.image_to_string(img)  # Just run OCR, ignore result
+                image_processed = True
+            except Exception as e:
+                await message.channel.send(f"⚠️ Error processing screenshot: {e}")
+                return  # Stop further processing if error
 
-                # Reject already used screenshot
-                if image_hash in processed_hashes:
-                    await message.channel.send("❌ This screenshot has already been used!")
-                    return
+    if image_processed:
+        await message.channel.send("✅ Screenshot processed!")
 
-                # Add to processed hashes
-                processed_hashes.add(image_hash)
-                save_processed_hashes(processed_hashes)
-
-                # Run OCR (but do not reply with extracted text)
-                try:
-                    image_stream = io.BytesIO(image_bytes)
-                    img = Image.open(image_stream)
-                    _ = pytesseract.image_to_string(img)
-                    await message.channel.send("✅ Screenshot processed!")
-                except Exception as e:
-                    await message.channel.send(f"⚠️ Error processing screenshot: {e}")
-
-# Start the bot (replace 'YOUR_DISCORD_TOKEN' with your actual token or use env variable)
+# Start the bot
 TOKEN = os.getenv("DISCORD_TOKEN") or "YOUR_DISCORD_TOKEN"
 client.run(TOKEN)
