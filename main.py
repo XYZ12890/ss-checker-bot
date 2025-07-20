@@ -27,6 +27,9 @@ def run_web():
 
 threading.Thread(target=run_web, daemon=True).start()
 
+# Restrict to this channel only
+TARGET_CHANNEL_ID = 1395273290703966320
+
 HASH_FILE = "processed_hashes.txt"
 
 def load_processed_hashes():
@@ -46,13 +49,11 @@ def get_image_hash(image_bytes):
     return hashlib.sha256(image_bytes).hexdigest()
 
 def is_payment_screenshot(text):
-    # Add or adjust payment keywords as needed
     keywords = ["paid", "payment", "successful", "amount", "received", "transaction"]
     text_lower = text.lower()
     return any(keyword in text_lower for keyword in keywords)
 
 async def assign_verified_role(member):
-    # Find the "Verified" role and assign it to the member
     guild = member.guild
     verified_role = discord.utils.get(guild.roles, name="Verified")
     if verified_role and verified_role not in member.roles:
@@ -68,6 +69,10 @@ async def on_ready():
 @client.event
 async def on_message(message):
     if message.author == client.user:
+        return
+
+    # Only process messages in the target channel
+    if message.channel.id != TARGET_CHANNEL_ID:
         return
 
     for attachment in message.attachments:
@@ -106,5 +111,5 @@ async def on_message(message):
                 return
 
 # Start the bot
-TOKEN = os.getenv("DISCORD_TOKEN") or "YOUR_DISCORD_TOKEN"
+TOKEN = os.getenv("DISCORD_TOKEN")
 client.run(TOKEN)
