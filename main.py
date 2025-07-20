@@ -3,8 +3,11 @@ from discord.ext import commands
 import os
 import re
 
+import pytesseract
+from PIL import Image
+
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID =   1346892731917795409# Replace with your server ID (as int)
+GUILD_ID = 1346892731917795409 # Replace with your server ID (as int)
 CHANNEL_ID = 1395273290703966320
 ROLE_NAME = "Verified"
 
@@ -31,20 +34,29 @@ async def on_message(message):
     if message.attachments:
         attachment = message.attachments[0]
         if any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg']):
-            await attachment.save("screenshot.jpg")
+            # Save the image
+            image_path = "screenshot.jpg"
+            await attachment.save(image_path)
 
-            # Read image content as text
-            with open("screenshot.jpg", "rb") as f:
-                content = f.read().decode('latin-1').lower()
-                if any(keyword in content for keyword in valid_keywords):
-                    await message.add_reaction("✅")
-                    guild = bot.get_guild(GUILD_ID)
-                    role = discord.utils.get(guild.roles, name=ROLE_NAME)
-                    member = guild.get_member(message.author.id)
-                    if role and member:
-                        await member.add_roles(role)
-                else:
-                    await message.delete()
-                    await message.channel.send(f"{message.author.mention} ⚠️ Invalid screenshot. Please upload a valid payment proof with UPI details.")
+            # Use Tesseract OCR to extract text
+            try:
+                img = Image.open(image_path)
+                content = pytesseract.image_to_string(img).lower()
+            except Exception as e:
+                await message.channel.send(f"{message.author.mention} ⚠️ Could not process the image: {e}")
+                await message.delete()
+                return
+
+            if any(keyword in content for keyword in valid_keywords):
+                await message.add_reaction("✅")
+                guild = bot.get_guild(GUILD_ID)
+                role = discord.utils.get(guild.roles, name=ROLE_NAME)
+                member = guild.get_member(message.author.id)
+                if role and member:
+                    await member.add_roles(role)
+            else:
+                await message.delete()
+                await message.channel.send(f"{message.author.mention} ⚠️ Invalid screenshot. Please upload a valid payment proof with UPI details.")
     await bot.process_commands(message)
-     bot.run(TOKEN)               
+
+bot.run(TOKEN)
