@@ -29,6 +29,7 @@ threading.Thread(target=run_web, daemon=True).start()
 
 # Restrict to this channel only
 TARGET_CHANNEL_ID = 1395273290703966320
+REGISTER_CHANNEL_ID = 1395257235881328681
 
 HASH_FILE = "processed_hashes.txt"
 
@@ -97,7 +98,12 @@ async def on_message(message):
 
                 processed_hashes.add(image_hash)
                 save_processed_hashes(processed_hashes)
+                # React instantly after verification
                 await message.add_reaction("✅")
+                # Reply with instructions and mention the register channel
+                await message.reply(
+                    f"Your payment is verified, head to <#{REGISTER_CHANNEL_ID}> channel."
+                )
                 # Assign Verified role
                 if isinstance(message.author, discord.Member):
                     await assign_verified_role(message.author)
@@ -111,5 +117,5 @@ async def on_message(message):
                 return
 
 # Start the bot
-TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN = os.getenv("DISCORD_TOKEN") or "YOUR_DISCORD_TOKEN"
 client.run(TOKEN)
