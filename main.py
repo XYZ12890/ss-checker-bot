@@ -69,11 +69,7 @@ async def on_ready():
 
 @client.event
 async def on_message(message):
-    if message.author == client.user:
-        return
-
-    # Only process messages in the target channel
-    if message.channel.id != TARGET_CHANNEL_ID:
+    if message.author == client.user or message.channel.id != TARGET_CHANNEL_ID:
         return
 
     for attachment in message.attachments:
@@ -96,26 +92,27 @@ async def on_message(message):
                     await message.delete()
                     return
 
+                # React instantly after verification, before any processing
+                await message.add_reaction("✅")
                 processed_hashes.add(image_hash)
                 save_processed_hashes(processed_hashes)
-                # React instantly after verification
-                await message.add_reaction("✅")
                 # Reply with instructions and mention the register channel
                 await message.reply(
                     f"Your payment is verified, head to <#{REGISTER_CHANNEL_ID}> channel."
                 )
                 # Assign Verified role
+                member = None
                 if isinstance(message.author, discord.Member):
-                    await assign_verified_role(message.author)
+                    member = message.author
                 elif message.guild:
                     member = message.guild.get_member(message.author.id)
-                    if member:
-                        await assign_verified_role(member)
+                if member:
+                    await assign_verified_role(member)
 
             except Exception as e:
                 await message.channel.send(f"⚠️ Error processing screenshot: {e}")
                 return
 
 # Start the bot
-TOKEN = os.getenv("DISCORD_TOKEN") or "YOUR_DISCORD_TOKEN"
+TOKEN = os.getenv("DISCORD_TOKEN")
 client.run(TOKEN)
