@@ -6,17 +6,74 @@ import hashlib
 import os
 import threading
 import re
+import asyncio
+import sqlite3
+import random
+import string
+from discord.ext import commands
 from flask import Flask
+
+# --- CONFIGURATION ---
+
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+TARGET_CHANNEL_ID = 1395273290703966320
+VERIFIED_LIST_CHANNEL_ID = 1397200894201958421
+VERIFIED_ROLE_NAME = "Verified"
+CAPTCHA_LENGTH = 5
+CAPTCHA_TIMEOUT = 90  # seconds
+VERIFICATION_COOLDOWN = 300  # seconds per user
+
+DATABASE_NAME = "verification.db"
+AUDIT_LOG_CHANNEL_NAME = "verification-logs"  # Name of the log channel to auto-create
+
+# --- BOT SETUP ---
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.messages = True
 intents.guilds = True
-intents.members = True  # Needed for managing roles
+intents.members = True
 
-client = discord.Client(intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents)
+AUDIT_LOG_CHANNEL_ID = None  # Will be set dynamically
 
-# Flask heartbeat server
+# --- DATABASE SETUP ---
+
+def db_connect():
+    return sqlite3.connect(DATABASE_NAME)
+
+def db_setup():
+    conn = db_connect()
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS verified_users (
+                    discord_id TEXT PRIMARY KEY,
+                    ign TEXT,
+                    uid TEXT,
+                    payment_verified INTEGER,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                 )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS payment_attempts (
+                    discord_id TEXT,
+                    image_hash TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                 )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS cooldowns (
+                    discord_id TEXT PRIMARY KEY,
+                    last_attempt INTEGER
+                 )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS appeals (
+                    discord_id TEXT PRIMARY KEY,
+                    reason TEXT,
+                    status TEXT DEFAULT "pending",
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                 )''')
+    conn.commit()
+    conn.close()
+
+db_setup()
+
+# --- FLASK HEARTBEAT ---
+
 app = Flask(__name__)
 
 @app.route("/")
@@ -28,57 +85,14 @@ def run_web():
 
 threading.Thread(target=run_web, daemon=True).start()
 
-TARGET_CHANNEL_ID = 1395273290703966320
-VERIFIED_LIST_CHANNEL_ID = 1397200894201958421  # Updated as per your request
-
-HASH_FILE = "processed_hashes.txt"
-VERIFIED_LIST_FILE = "verified_list.txt"
-VERIFIED_LIST_MESSAGE_ID_FILE = "verified_list_message_id.txt"
-
-awaiting_ign_uid = {}  # {user_id: True}
-
-def load_processed_hashes():
-    if not os.path.exists(HASH_FILE):
-        return set()
-    with open(HASH_FILE, "r") as f:
-        return set(line.strip() for line in f.readlines())
-
-def save_processed_hashes(processed_hashes):
-    with open(HASH_FILE, "w") as f:
-        for h in processed_hashes:
-            f.write(f"{h}\n")
-
-def load_verified_list():
-    if not os.path.exists(VERIFIED_LIST_FILE):
-        return []
-    with open(VERIFIED_LIST_FILE, "r") as f:
-        return [line.strip() for line in f.readlines()]
-
-def save_verified_list(verified_list):
-    with open(VERIFIED_LIST_FILE, "w") as f:
-        for entry in verified_list:
-            f.write(f"{entry}\n")
-
-def load_verified_list_message_id():
-    if not os.path.exists(VERIFIED_LIST_MESSAGE_ID_FILE):
-        return None
-    with open(VERIFIED_LIST_MESSAGE_ID_FILE, "r") as f:
-        return f.read().strip()
-
-def save_verified_list_message_id(message_id):
-    with open(VERIFIED_LIST_MESSAGE_ID_FILE, "w") as f:
-        f.write(str(message_id))
-
-processed_hashes = load_processed_hashes()
-verified_list = load_verified_list()
+# --- UTILS ---
 
 def get_image_hash(image_bytes):
     return hashlib.sha256(image_bytes).hexdigest()
 
 def is_payment_screenshot(text):
-    keywords = ["paid", "payment", "successful", "amount", "received", "transaction"]
-    text_lower = text.lower()
-    return any(keyword in text_lower for keyword in keywords)
+    keywords = ["paid", "payment", "successful", "amount", "received", "transaction", "upi", "credited", "debited"]
+    return any(keyword in text.lower() for keyword in keywords)
 
 def extract_ign_uid(content):
     ign = None
@@ -91,108 +105,316 @@ def extract_ign_uid(content):
         uid = uid_match.group(1).strip()
     return ign, uid
 
-async def assign_verified_role(member):
-    guild = member.guild
-    verified_role = discord.utils.get(guild.roles, name="Verified")
-    if verified_role and verified_role not in member.roles:
-        try:
-            await member.add_roles(verified_role, reason="Sent verified payment screenshot")
-        except Exception as e:
-            print(f"Error assigning Verified role: {e}")
+def random_captcha(length=CAPTCHA_LENGTH):
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
-async def update_verified_list_channel(guild, verified_list):
+async def send_audit_log(guild, embed):
+    global AUDIT_LOG_CHANNEL_ID
+    if AUDIT_LOG_CHANNEL_ID:
+        channel = guild.get_channel(AUDIT_LOG_CHANNEL_ID)
+        if channel:
+            await channel.send(embed=embed)
+
+# --- COOLDOWN CHECK ---
+
+def set_cooldown(user_id):
+    conn = db_connect()
+    c = conn.cursor()
+    now = int(asyncio.get_event_loop().time())
+    c.execute("INSERT OR REPLACE INTO cooldowns (discord_id, last_attempt) VALUES (?, ?)", (str(user_id), now))
+    conn.commit()
+    conn.close()
+
+def get_cooldown(user_id):
+    conn = db_connect()
+    c = conn.cursor()
+    c.execute("SELECT last_attempt FROM cooldowns WHERE discord_id = ?", (str(user_id),))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return int(row[0])
+    return None
+
+# --- CAPTCHA CHALLENGE ---
+
+async def captcha_challenge(user: discord.User):
+    captcha = random_captcha()
+    try:
+        dm = await user.create_dm()
+        await dm.send(embed=discord.Embed(
+            title="Captcha Challenge",
+            description=f"Please type the following code to continue:\n`{captcha}`",
+            color=discord.Color.blue()
+        ))
+        def check(m):
+            return m.author.id == user.id and m.channel == dm
+        msg = await bot.wait_for('message', check=check, timeout=CAPTCHA_TIMEOUT)
+        if msg.content.strip() == captcha:
+            await dm.send("Captcha passed! Proceeding with verification.")
+            return True
+        else:
+            await dm.send("Incorrect captcha. Please try the process again later.")
+            return False
+    except asyncio.TimeoutError:
+        await dm.send("Captcha timed out. Please start verification again.")
+        return False
+
+# --- PAYMENT SCREENSHOT HANDLING ---
+
+async def start_verification(message, image_bytes):
+    discord_id = str(message.author.id)
+    # OCR
+    image_stream = io.BytesIO(image_bytes)
+    img = Image.open(image_stream)
+    text = pytesseract.image_to_string(img)
+    if not is_payment_screenshot(text):
+        await message.reply("❌ This does not appear to be a valid payment screenshot. Make sure your screenshot contains a payment confirmation.")
+        await message.delete()
+        return
+
+    # Captcha
+    passed = await captcha_challenge(message.author)
+    if not passed:
+        return
+
+    # Ask for IGN and UID in DM (privacy)
+    dm = await message.author.create_dm()
+    await dm.send(embed=discord.Embed(
+        title="Almost Done!",
+        description="Please reply with your **IGN** and **UID** in the following format:\n\n`IGN: YourName UID: YourUID`",
+        color=discord.Color.green()
+    ))
+    def ignuid_check(m):
+        return m.author.id == message.author.id and m.channel == dm
+    try:
+        ignuid_msg = await bot.wait_for('message', check=ignuid_check, timeout=180)
+        ign, uid = extract_ign_uid(ignuid_msg.content)
+        if not ign or not uid:
+            await dm.send("❌ Invalid format. Please use: `IGN: YourName UID: YourUID`.")
+            return
+        # Save to DB
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute("INSERT OR REPLACE INTO verified_users (discord_id, ign, uid, payment_verified) VALUES (?, ?, ?, ?)",
+                  (discord_id, ign, uid, 1))
+        conn.commit()
+        conn.close()
+        # Give role
+        guild = message.guild
+        member = guild.get_member(message.author.id)
+        if member:
+            role = discord.utils.get(guild.roles, name=VERIFIED_ROLE_NAME)
+            if role:
+                await member.add_roles(role, reason="Payment verified")
+        # Update verified list channel
+        await update_verified_list_channel(guild)
+        # Success DM
+        await dm.send(embed=discord.Embed(
+            title="✅ Verification Complete!",
+            description="You are now verified and have access to the server.",
+            color=discord.Color.green()
+        ))
+        # Audit log
+        embed = discord.Embed(
+            title="User Verified",
+            description=f"User: {message.author.mention}\nIGN: {ign}\nUID: {uid}",
+            color=discord.Color.green()
+        )
+        await send_audit_log(guild, embed)
+    except asyncio.TimeoutError:
+        await dm.send("Timeout! Please start verification again.")
+
+async def update_verified_list_channel(guild):
+    # Show all verified users in VERIFIED_LIST_CHANNEL_ID
     channel = guild.get_channel(VERIFIED_LIST_CHANNEL_ID)
     if not channel:
-        print("Verified list channel not found.")
         return
-    content = "**Verified Players:**\n" + "\n".join(verified_list) if verified_list else "**Verified Players:**\nNo players verified yet."
-    message_id = load_verified_list_message_id()
-    message = None
-    try:
-        if message_id:
-            try:
-                message = await channel.fetch_message(int(message_id))
-            except Exception:
-                message = None
-        if message:
-            await message.edit(content=content)
-        else:
-            sent_message = await channel.send(content)
-            save_verified_list_message_id(sent_message.id)
-    except Exception as e:
-        print(f"Error updating verified list channel: {e}")
+    conn = db_connect()
+    c = conn.cursor()
+    c.execute("SELECT ign, uid, discord_id FROM verified_users WHERE payment_verified = 1")
+    rows = c.fetchall()
+    conn.close()
+    entries = [f"IGN: {ign} | UID: {uid} | <@{discord_id}>" for ign, uid, discord_id in rows]
+    content = "**Verified Players:**\n" + "\n".join(entries) if entries else "**Verified Players:**\nNo players verified yet."
+    async for msg in channel.history(limit=10):
+        if msg.author == bot.user:
+            await msg.edit(content=content)
+            return
+    await channel.send(content)
 
-@client.event
+# --- LOG CHANNEL AUTO-CREATION ---
+
+async def get_or_create_log_channel(guild, channel_name=AUDIT_LOG_CHANNEL_NAME):
+    # Try to find an existing text channel with the given name
+    existing = discord.utils.get(guild.text_channels, name=channel_name)
+    if existing:
+        return existing
+    # Otherwise, create the channel
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        guild.me: discord.PermissionOverwrite(read_messages=True)
+    }
+    channel = await guild.create_text_channel(channel_name, overwrites=overwrites, reason="Created for verification logging")
+    return channel
+
+# --- SLASH COMMANDS ---
+
+@bot.tree.command(name="status", description="Check your verification status.")
+async def status(interaction: discord.Interaction):
+    discord_id = str(interaction.user.id)
+    conn = db_connect()
+    c = conn.cursor()
+    c.execute("SELECT ign, uid, payment_verified FROM verified_users WHERE discord_id = ?", (discord_id,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        ign, uid, verified = row
+        embed = discord.Embed(
+            title="Your Verification Status",
+            description=f"IGN: {ign}\nUID: {uid}\nStatus: {'✅ Verified' if verified else '❌ Not Verified'}",
+            color=discord.Color.green() if verified else discord.Color.red()
+        )
+    else:
+        embed = discord.Embed(
+            title="Not Verified",
+            description="You have not completed verification yet.",
+            color=discord.Color.red()
+        )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="appeal", description="Appeal your verification rejection.")
+async def appeal(interaction: discord.Interaction, reason: str):
+    discord_id = str(interaction.user.id)
+    conn = db_connect()
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO appeals (discord_id, reason, status) VALUES (?, ?, ?)", (discord_id, reason, "pending"))
+    conn.commit()
+    conn.close()
+    embed = discord.Embed(
+        title="Appeal Submitted",
+        description="Your appeal has been submitted and will be reviewed by staff.",
+        color=discord.Color.blue()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    # Log to audit
+    guild = interaction.guild
+    log_embed = discord.Embed(
+        title="Appeal Submitted",
+        description=f"User: <@{discord_id}>\nReason: {reason}",
+        color=discord.Color.orange()
+    )
+    await send_audit_log(guild, log_embed)
+
+@bot.tree.command(name="export_verified", description="(Admin) Export all verified users as CSV.")
+@commands.has_permissions(administrator=True)
+async def export_verified(interaction: discord.Interaction):
+    conn = db_connect()
+    c = conn.cursor()
+    c.execute("SELECT ign, uid, discord_id FROM verified_users WHERE payment_verified = 1")
+    rows = c.fetchall()
+    conn.close()
+    csv_content = "IGN,UID,DiscordID\n" + "\n".join([f"{ign},{uid},{discord_id}" for ign, uid, discord_id in rows])
+    file = discord.File(io.BytesIO(csv_content.encode()), filename="verified_users.csv")
+    await interaction.response.send_message("Here is the export of all verified users:", file=file, ephemeral=True)
+
+# --- PAYMENT SCREENSHOT LISTENER ---
+
+@bot.event
 async def on_ready():
-    print(f'Logged in as {client.user}')
+    print(f'Bot logged in as {bot.user}')
+    try:
+        synced = await bot.tree.sync()
+        print(f"Slash commands synced: {len(synced)}")
+    except Exception as e:
+        print(f"Failed to sync commands: {e}")
 
-@client.event
+    # For every guild, ensure log channel exists and cache its ID
+    for guild in bot.guilds:
+        log_channel = await get_or_create_log_channel(guild)
+        global AUDIT_LOG_CHANNEL_ID
+        AUDIT_LOG_CHANNEL_ID = log_channel.id
+
+        # Post a ready message in the log channel (only once)
+        found = False
+        async for msg in log_channel.history(limit=10):
+            if msg.author == bot.user and "Verification Log Channel Ready" in msg.content:
+                found = True
+                break
+        if not found:
+            await log_channel.send(embed=discord.Embed(
+                title="Verification Log Channel Ready",
+                description="All verification events will be logged here.",
+                color=discord.Color.purple()
+            ))
+
+    # Post welcome/instruction embed in payment channel if not already present
+    channel = bot.get_channel(TARGET_CHANNEL_ID)
+    if channel:
+        found = False
+        async for msg in channel.history(limit=10):
+            if msg.author == bot.user and "How to verify" in msg.content:
+                found = True
+                break
+        if not found:
+            embed = discord.Embed(
+                title="How to verify",
+                description=(
+                    "1. Send a clear payment screenshot in this channel.\n"
+                    "2. You will receive a DM to complete captcha and provide your IGN/UID for verification.\n"
+                    "3. Abuse or fake screenshots will lead to a ban.\n"
+                    "4. Use `/status` at any time to check your progress."
+                ),
+                color=discord.Color.blue()
+            )
+            await channel.send(embed=embed)
+
+@bot.event
 async def on_message(message):
-    if message.author == client.user:
+    if message.author == bot.user or message.author.bot:
         return
 
-    # Step 1: Waiting for IGN/UID reply
-    if message.author.id in awaiting_ign_uid:
-        ign, uid = extract_ign_uid(message.content)
-        if ign and uid:
-            entry = f"IGN: {ign} | UID: {uid} | Discord: {message.author.mention}"
-            if entry not in verified_list:
-                verified_list.append(entry)
-                save_verified_list(verified_list)
-                await update_verified_list_channel(message.guild, verified_list)
-            await message.reply("Thank you! Your IGN and UID have been recorded and you are fully verified.")
-            del awaiting_ign_uid[message.author.id]
-        else:
-            await message.reply("IGN or UID not found in your message. Please reply in the format: `IGN: YourName UID: YourUID`.")
-        return
+    # Listen for payment screenshots in the payment channel
+    if message.channel.id == TARGET_CHANNEL_ID:
+        # Cooldown check
+        last = get_cooldown(message.author.id)
+        now = int(asyncio.get_event_loop().time())
+        if last and now - last < VERIFICATION_COOLDOWN:
+            await message.reply("⏳ Please wait before trying to verify again.")
+            return
 
-    # Step 2: Main payment screenshot logic
-    if message.channel.id != TARGET_CHANNEL_ID:
-        return
-
-    for attachment in message.attachments:
-        if attachment.content_type and attachment.content_type.startswith('image/'):
-            image_bytes = await attachment.read()
-            image_hash = get_image_hash(image_bytes)
-
-            # Check for reused screenshot
-            if image_hash in processed_hashes:
-                await message.delete()
-                return
-
-            try:
-                image_stream = io.BytesIO(image_bytes)
-                img = Image.open(image_stream)
-                text = pytesseract.image_to_string(img)
-
-                if not is_payment_screenshot(text):
-                    await message.reply("Send payment screenshot, otherwise you will be get banned.")
+        for attachment in message.attachments:
+            if attachment.content_type and attachment.content_type.startswith('image/'):
+                image_bytes = await attachment.read()
+                image_hash = get_image_hash(image_bytes)
+                # Check for duplicate attempts
+                conn = db_connect()
+                c = conn.cursor()
+                c.execute("SELECT 1 FROM payment_attempts WHERE image_hash = ?", (image_hash,))
+                if c.fetchone():
+                    await message.reply("❌ This screenshot has already been used. If this is a mistake, contact staff.")
                     await message.delete()
+                    conn.close()
                     return
+                # Log attempt
+                c.execute("INSERT INTO payment_attempts (discord_id, image_hash) VALUES (?, ?)", (str(message.author.id), image_hash))
+                conn.commit()
+                conn.close()
+                set_cooldown(message.author.id)
 
-                # React instantly after verification
-                await message.add_reaction("✅")
-                processed_hashes.add(image_hash)
-                save_processed_hashes(processed_hashes)
-                await message.reply(
-                    "Your payment is verified! Please reply with your IGN and UID in the format: `IGN: YourName UID: YourUID`."
-                )
-                # Assign Verified role
-                member = None
-                if isinstance(message.author, discord.Member):
-                    member = message.author
-                elif message.guild:
-                    member = message.guild.get_member(message.author.id)
-                if member:
-                    await assign_verified_role(member)
-
-                # Put user in awaiting_ign_uid state
-                awaiting_ign_uid[message.author.id] = True
-
-            except Exception as e:
-                await message.channel.send(f"⚠️ Error processing screenshot: {e}")
+                await start_verification(message, image_bytes)
                 return
 
-# Start the bot
-TOKEN = os.getenv("DISCORD_TOKEN")
-client.run(TOKEN)
+# --- BAN ON ABUSE ---
+
+async def ban_user(guild, user, reason):
+    await guild.ban(user, reason=reason, delete_message_days=1)
+    embed = discord.Embed(
+        title="User Banned",
+        description=f"<@{user.id}> has been banned.\nReason: {reason}",
+        color=discord.Color.red()
+    )
+    await send_audit_log(guild, embed)
+
+# --- RUN BOT ---
+
+bot.run(DISCORD_TOKEN)
