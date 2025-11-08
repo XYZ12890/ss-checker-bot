@@ -3,8 +3,46 @@ import asyncio
 import io
 from PIL import Image
 import pytesseract
+import random
 
-# ... rest of your imports and variables ...
+# --- CONFIG ---
+CAPTCHA_TIMEOUT = 60  # seconds
+VERIFIED_ROLE_NAME = "Verified"     # Change as needed for your server
+VERIFIED_LIST_CHANNEL_ID = 1234567890  # Replace with your verified-list channel id
+
+
+intents = discord.Intents.default()
+intents.members = True
+intents.message_content = True
+
+bot = discord.Client(intents=intents)
+
+# Dummy DB function
+def db_connect():
+    import sqlite3
+    return sqlite3.connect("verified_users.db")
+
+def is_payment_screenshot(text):
+    # Simple OCR keyword check (customize for your needs)
+    return "payment" in text.lower() or "success" in text.lower() or "transaction" in text.lower()
+
+def extract_ign_uid(content):
+    try:
+        parts = content.split()
+        ign = None
+        uid = None
+        for i, p in enumerate(parts):
+            if p.lower() == "ign:" and i + 1 < len(parts):
+                ign = parts[i + 1]
+            if p.lower() == "uid:" and i + 1 < len(parts):
+                uid = parts[i + 1]
+        return ign, uid
+    except Exception:
+        return None, None
+
+def random_captcha():
+    # Generate a random 5-character alphanumeric captcha
+    return ''.join(random.choices('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', k=5))
 
 async def captcha_challenge(user: discord.User, channel=None):
     captcha = random_captcha()
@@ -35,23 +73,21 @@ async def captcha_challenge(user: discord.User, channel=None):
             pass
         return False
 
-# --- PAYMENT SCREENSHOT HANDLING ---
-
 async def start_verification(message, image_bytes):
     discord_id = str(message.author.id)
-    # OCR
     image_stream = io.BytesIO(image_bytes)
     img = Image.open(image_stream)
     text = pytesseract.image_to_string(img)
     if not is_payment_screenshot(text):
-        await message.reply("❌ This does not appear to be a valid payment screenshot. Make sure your screenshot contains a payment confirmation.")
+        await message.reply(
+            "❌ This does not appear to be a valid payment screenshot. Make sure your screenshot contains a payment confirmation."
+        )
         await message.delete()
         return
 
     # Captcha
     passed = await captcha_challenge(message.author, channel=message.channel)
     if not passed:
-        # If captcha_challenge failed due to DM permissions, the user is already notified.
         return
 
     # Ask for IGN and UID in DM (privacy)
@@ -73,6 +109,7 @@ async def start_verification(message, image_bytes):
             # Save to DB
             conn = db_connect()
             c = conn.cursor()
+            c.execute("CREATE TABLE IF NOT EXISTS verified_users (discord_id TEXT PRIMARY KEY, ign TEXT, uid TEXT, payment_verified INTEGER)")
             c.execute("INSERT OR REPLACE INTO verified_users (discord_id, ign, uid, payment_verified) VALUES (?, ?, ?, ?)",
                       (discord_id, ign, uid, 1))
             conn.commit()
@@ -92,13 +129,8 @@ async def start_verification(message, image_bytes):
                 description="You are now verified and have access to the server.",
                 color=discord.Color.green()
             ))
-            # Audit log
-            embed = discord.Embed(
-                title="User Verified",
-                description=f"User: {message.author.mention}\nIGN: {ign}\nUID: {uid}",
-                color=discord.Color.green()
-            )
-            await send_audit_log(guild, embed)
+            # Audit log (optional function, can be implemented as needed)
+            # await send_audit_log(guild, embed)
         except asyncio.TimeoutError:
             await dm.send("Timeout! Please start verification again.")
     except discord.Forbidden:
@@ -107,6 +139,42 @@ async def start_verification(message, image_bytes):
         )
 
 async def update_verified_list_channel(guild):
-    # Show all verified users in VERIFIED_LIST_CHANNEL_ID
+    # Update a status channel for all verified users (dummy implementation)
+    try:
+        channel = guild.get_channel(VERIFIED_LIST_CHANNEL_ID)
+        if not channel:
+            return
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute("SELECT ign, uid FROM verified_users WHERE payment_verified=1")
+        verified = c.fetchall()
+        conn.close()
+        lines = [f"{ign} ({uid})" for ign, uid in verified]
+        content = "Verified users:\n" + "\n".join(lines) if lines else "No verified users yet."
+        async for msg in channel.history(limit=5):
+            await msg.delete()
+        await channel.send(content)
+    except Exception as e:
+        print("Error updating verified list channel:", e)
 
-# ... rest of your code ...
+@bot.event
+async def on_ready():
+    print(f"{bot.user} is online!")
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    # Example usage: user sends `!verify` with attachment (payment screenshot)
+    if message.content.startswith("!verify"):
+        if message.attachments:
+            try:
+                image_bytes = await message.attachments[0].read()
+                await start_verification(message, image_bytes)
+            except Exception as e:
+                await message.reply(f"Error processing screenshot: {e}")
+        else:
+            await message.reply("Please attach your payment screenshot with the !verify command.")
+
+# Start the bot
+bot.run("DISCORD_TOKEN")
