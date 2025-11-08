@@ -177,4 +177,4 @@ async def on_message(message):
             await message.reply("Please attach your payment screenshot with the !verify command.")
 
 # Start the bot
-bot.run("DISCORD_TOKEN")
+bot.run(DISCORD_TOKEN)
